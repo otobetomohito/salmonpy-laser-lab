@@ -45,19 +45,38 @@ button{background:#006b58;color:#fff;border:0;margin-top:14px;cursor:pointer}but
 <button id="play" type="button">再生</button>
 <div class="plot"><canvas id="current" aria-label="左側の電場波形と真空対照"></canvas></div>
 <div class="plot"><canvas id="loss" aria-label="右側の電場波形と真空対照"></canvas></div>
+<h2>複素誘電関数 ε(ω)</h2>
+<div class="plot"><canvas id="epsilon-real" aria-label="比誘電率の実部"></canvas></div>
+<div class="plot"><canvas id="epsilon-imag" aria-label="比誘電率の虚部"></canvas></div>
+<p id="epsilon-at-pulse" class="note"></p>
+<p class="note">橙色の破線はパルスの中心エネルギーです。誘電関数は同じLDモデルの線形応答を式から評価しています。</p>
 <p class="note">薄緑は膜の領域。灰色の破線は同じパルスの真空対照です。左の波形には入射波と反射波が含まれます。位置9 µmと13 µmで観測し、膜の左端は11 µmです。1次元・垂直入射、空間刻み4 nm、Mur吸収境界。物質は教育用の合成モデルです。</p>
 </section>
 </main>
 <script>
+const materialPoles={vacuum:[],lorentz:[[1,3]],drude:[[1,0]],mixed:[[.25,0],[.75,3]]};
+const hbarEvFs=.6582119569, plasmaEv=6;
+
+// exp(-iωt) convention. Energies are ℏ times the angular frequencies.
+function dielectric(model,energy,dampingEv){
+  let real=1, imag=0;
+  for(const [strength,resonance] of materialPoles[model]){
+    const a=resonance**2-energy**2, b=dampingEv*energy;
+    const weight=strength*plasmaEv**2/(a*a+b*b);
+    real+=weight*a;
+    imag+=weight*b;
+  }
+  return {real,imag};
+}
+
 // Yee grid in nm/fs, with H scaled to the electric field units in vacuum.
 // Local trapezoidal LD current and Ampere's law are solved together.
 function simulate({model,photon_ev,width_fs,damping_ev,thickness_nm},dx=4) {
-  const c=299.792458, hbar=.6582119569, dt=.8*dx/c, n=Math.round(24000/dx)+1;
+  const c=299.792458, hbar=hbarEvFs, dt=.8*dx/c, n=Math.round(24000/dx)+1;
   const first=Math.round(11000/dx), cells=Math.round(thickness_nm/dx), last=first+cells;
   const left=Math.round(9000/dx), right=Math.round(13000/dx);
-  const modes={vacuum:[],lorentz:[[1,3]],drude:[[1,0]],mixed:[[.25,0],[.75,3]]};
-  const gamma=damping_ev/hbar, wp=6/hbar, courant=c*dt/dx;
-  const poles=modes[model].map(([f,res])=>{
+  const gamma=damping_ev/hbar, wp=plasmaEv/hbar, courant=c*dt/dx;
+  const poles=materialPoles[model].map(([f,res])=>{
     const w=res/hbar, g=gamma*dt/2, k=(w*dt)**2/4, d=1+g+k;
     return {a:(1-g-k)/d,b:f*wp**2*dt/(2*d),k:w*w*dt/d,
       j:new Float64Array(cells),p:new Float64Array(cells)};
@@ -106,12 +125,12 @@ for (const [id, unit] of Object.entries(knobs)) {
   const label = () => { get(id+'Val').value = get(id).value+' '+unit; };
   get(id).addEventListener('input',label); label();
 }
-let result, measured, vacuum, playback;
-function chart(id,x,y,title,xLabel,color,overlay,slab) {
+let result, measured, vacuum, playback, epsilon;
+function chart(id,x,y,title,xLabel,color,overlay,slab,{range=[-1.15,1.15],marker}={}) {
   const c = get(id), {width:w,height:h}=c.getBoundingClientRect(), ratio=devicePixelRatio;
   c.width=Math.round(w*ratio); c.height=Math.round(h*ratio);
   const p=c.getContext('2d'); p.scale(ratio,ratio);
-  const l=65,r=w-15,a=33,b=h-40, lo=-1.15, hi=1.15;
+  const l=65,r=w-15,a=33,b=h-40, [lo,hi]=range;
   const dy=(hi-lo)||1, X=v=>l+(r-l)*(v-x[0])/(x.at(-1)-x[0]);
   const Y=v=>b-(b-a)*(v-lo)/dy;
   p.font='bold 13px system-ui'; p.fillStyle='#162738'; p.fillText(title,1,17);
@@ -129,6 +148,10 @@ function chart(id,x,y,title,xLabel,color,overlay,slab) {
     x.forEach((v,i)=>i?p.lineTo(X(v),Y(overlay[i])):p.moveTo(X(v),Y(overlay[i])));
     p.stroke();p.setLineDash([]);
   }
+  if(marker!==undefined){
+    p.strokeStyle='#a85216';p.setLineDash([5,4]);p.beginPath();
+    p.moveTo(X(marker),a);p.lineTo(X(marker),b);p.stroke();p.setLineDash([]);
+  }
   p.strokeStyle=color;p.lineWidth=1.8;p.beginPath();
   x.forEach((v,i)=>i?p.lineTo(X(v),Y(y[i])):p.moveTo(X(v),Y(y[i])));p.stroke();
 }
@@ -137,6 +160,16 @@ function draw(){
   drawFrame();
   chart('current',result.t,result.incidentSide,'膜の左側  z = 9 µm','時間（fs）','#00745a',vacuum.incidentSide);
   chart('loss',result.t,result.transmitted,'膜の右側  z = 13 µm','時間（fs）','#7b4986',vacuum.transmitted);
+  const {energy,real,imag}=epsilon;
+  const axis=y=>{
+    const lo=Math.min(0,...y), hi=Math.max(0,...y);
+    return [lo<0?lo*1.06:0,hi>0?hi*1.06:lo<0?0:1];
+  };
+  for(const [id,y,title,color] of [
+    ['epsilon-real',real,'実部 Re ε','#006954'],
+    ['epsilon-imag',imag,'虚部 Im ε','#7b4986'],
+  ])chart(id,energy,y,title,'光子エネルギー（eV）',color,null,null,
+    {range:axis(y),marker:measured.photon_ev});
 }
 function drawFrame(){
   if(!result)return;
@@ -165,6 +198,12 @@ get('controls').addEventListener('submit',e=>{
   try{
     const data=simulate(params);
     vacuum=params.model==='vacuum'?data:simulate({...params,model:'vacuum'});
+    const energy=Array.from({length:651},(_,i)=>(50+i)/100);
+    const values=energy.map(e=>dielectric(params.model,e,params.damping_ev));
+    epsilon={energy,real:values.map(v=>v.real),imag:values.map(v=>v.imag)};
+    const atPulse=dielectric(params.model,params.photon_ev,params.damping_ev);
+    get('epsilon-at-pulse').textContent=
+      `中心 ${params.photon_ev} eV で Re ε = ${atPulse.real.toFixed(3)}、Im ε = ${atPulse.imag.toFixed(3)}`;
     stop();result=data;measured=params;get('frame').max=data.frames.length-1;get('frame').value=0;draw();get('csv').disabled=false;
     get('status').textContent='計算済み · '+params.photon_ev+' eV / '+params.width_fs+' fs / ℏγ '+params.damping_ev+' eV';
   } catch(error){get('status').textContent=error.message;}
