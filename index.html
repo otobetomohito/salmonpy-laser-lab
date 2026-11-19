@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>レーザーと物質の応答 | SALMONpy</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#162738;background:#edf3f3}
+*{box-sizing:border-box}body{margin:0}header{background:#102d3b;color:#fff;padding:38px max(5vw,20px) 30px}
+header small{color:#8ee1cc;font-weight:700;letter-spacing:.08em}h1{margin:7px 0;font-size:clamp(1.7rem,4vw,2.6rem)}p{line-height:1.65;margin:.45rem 0}
+main{max-width:1360px;margin:auto;padding:25px;display:grid;grid-template-columns:290px minmax(0,1fr);gap:20px}
+section{background:white;border-radius:12px;padding:20px;box-shadow:0 2px 10px #182b3710}
+aside{display:grid;gap:14px;align-content:start}h2{font-size:1.1rem;margin:0 0 12px}
+label{display:block;margin:15px 0 5px;font-size:.9rem;font-weight:650}output{float:right;color:#006952}
+input,select,button{width:100%;accent-color:#007964}select,button{padding:9px;border-radius:6px;font:inherit}
+button{background:#006b58;color:#fff;border:0;margin-top:14px;cursor:pointer}button:disabled{opacity:.55}
+#status{font-size:.85rem;min-height:1.6em}ol{padding-left:1.25rem;line-height:1.65;margin-bottom:0}
+#charts{display:grid;gap:12px}.plot{height:204px}canvas{width:100%;height:100%;display:block}
+.note{font-size:.85rem;color:#405a68}
+@media(max-width:780px){main{grid-template-columns:1fr;padding:12px}header{padding:24px 16px}}
+</style>
+<header><small>SALMONpy · 大学院講義</small><h1>レーザーと物質の応答</h1>
+<p>パルスの光子エネルギーや幅を変えて、電流の振幅と減衰を比べる。</p></header>
+<main>
+<aside><section><h2>計算条件</h2>
+<form id="controls">
+<label for="model">物質モデル</label><select id="model"><option value="lorentz">ローレンツ（束縛電子）</option><option value="drude">ドルーデ（自由電子）</option><option value="mixed">ドルーデ＋ローレンツ</option></select>
+<label for="photon_ev">光子エネルギー <output id="photon_evVal"></output></label>
+<input id="photon_ev" type="range" min=".5" max="6" step=".1" value="3">
+<label for="width_fs">強度の半値全幅 <output id="width_fsVal"></output></label>
+<input id="width_fs" type="range" min="1" max="8" step=".5" value="4">
+<label for="damping_ev">減衰定数 ℏγ <output id="damping_evVal"></output></label>
+<input id="damping_ev" type="range" min=".05" max="1" step=".05" value=".2">
+<button id="run">計算する</button><p id="status" role="status"></p>
+</form>
+<button id="csv" disabled>電場と電流のCSVを保存</button>
+</section><section><h2>講義で試すこと</h2><ol>
+<li>光子エネルギーを 3 eV と 5 eV にして、パルス後の電流を比べる。</li>
+<li>減衰を変えて、電流振動と吸収ピークの幅を比べる。</li>
+<li>自由電子モデルに切り替え、低エネルギー側の応答を比べる。</li>
+</ol></section></aside>
+<section id="charts"><h2>計算結果</h2>
+<div class="plot"><canvas id="field" aria-label="電場の時間波形"></canvas></div>
+<div class="plot"><canvas id="current" aria-label="電荷電流の時間波形"></canvas></div>
+<div class="plot"><canvas id="loss" aria-label="誘電率の虚部"></canvas></div>
+<p class="note">束縛電子の共鳴は 3 eV。誘電率は定常線形応答で、下段の点線はパルスの中心エネルギーを示します。教育用の合成モデルを、SALMONpyと同じ更新式でブラウザ内計算します。</p></section>
+</main>
+<script>
+// Lorentz–Drude trapezoidal update, checked against SALMONpy LorentzDrude.
+function simulate({model,photon_ev,width_fs,damping_ev}) {
+  const ev = 27.211386245988, fs = 0.02418884326505, dt = 0.25;
+  const models = {lorentz:[[1,3]], drude:[[1,0]], mixed:[[0.25,0],[0.75,3]]};
+  const gamma = damping_ev / ev, wp = 6 / ev;
+  const poles = models[model].map(([f,resonance]) => {
+    const w = resonance / ev, halfGamma = gamma*dt/2, spring = (w*dt)**2/4;
+    const den = 1 + halfGamma + spring;
+    return {f,w,p:0,j:0,a:(1-halfGamma-spring)/den,
+      b:f*wp**2*dt/(8*Math.PI*den), c:w**2*dt/den};
+  });
+  const t=[], field=[], current=[];
+  let oldE=0;
+  for(let i=0;i<=10000;i++){
+    const time=i*dt*fs-20;
+    const E=1e-3*Math.exp(-2*Math.log(2)*(time/width_fs)**2)
+      *Math.cos((photon_ev/ev)*(time/fs));
+    if(i>0)for(const pole of poles){
+      const next=pole.a*pole.j+pole.b*(E+oldE)-pole.c*pole.p;
+      pole.p+=0.5*dt*(next+pole.j);
+      pole.j=next;
+    }
+    if(i%10===0){t.push(time);field.push(E);current.push(poles.reduce((sum,p)=>sum+p.j,0));}
+    oldE=E;
+  }
+  const energy=Array.from({length:400},(_,i)=>0.05+i*(7-0.05)/399);
+  const loss=energy.map(e=>poles.reduce((sum,{f,w})=>{
+    const omega=e/ev, re=w*w-omega*omega, im=gamma*omega;
+    return sum+f*wp**2*im/(re*re+im*im);
+  },0));
+  return {t,field,current,energy,loss};
+}
+
+const get = id => document.getElementById(id);
+const knobs = {photon_ev:'eV', width_fs:'fs', damping_ev:'eV'};
+for (const [id, unit] of Object.entries(knobs)) {
+  const label = () => { get(id+'Val').value = get(id).value+' '+unit; };
+  get(id).addEventListener('input',label); label();
+}
+let result, measured;
+function chart(id,x,y,title,xLabel,color,marker) {
+  const c = get(id), {width:w,height:h}=c.getBoundingClientRect(), ratio=devicePixelRatio;
+  c.width=Math.round(w*ratio); c.height=Math.round(h*ratio);
+  const p=c.getContext('2d'); p.scale(ratio,ratio);
+  const l=65,r=w-15,a=33,b=h-40, lo=Math.min(0,...y), hi=Math.max(0,...y);
+  const dy=(hi-lo)||1, X=v=>l+(r-l)*(v-x[0])/(x.at(-1)-x[0]);
+  const Y=v=>b-(b-a)*(v-lo)/dy;
+  p.font='bold 13px system-ui'; p.fillStyle='#162738'; p.fillText(title,1,17);
+  p.font='11px system-ui';
+  for(let i=0;i<=4;i++){
+    const u=i/4, yy=a+(b-a)*u, xx=l+(r-l)*u;
+    p.strokeStyle='#dce7e8';p.beginPath();p.moveTo(l,yy);p.lineTo(r,yy);p.stroke();
+    p.fillStyle='#405a68';p.fillText((hi-u*dy).toExponential(1),0,yy+4);
+    p.textAlign='center';p.fillText((x[0]+u*(x.at(-1)-x[0])).toFixed(1),xx,b+14);p.textAlign='start';
+  }
+  p.textAlign='center';p.fillText(xLabel,(l+r)/2,h-7);p.textAlign='start';
+  if(marker!==undefined){
+    p.strokeStyle='#aa5d22';p.setLineDash([5,4]);p.beginPath();p.moveTo(X(marker),a);p.lineTo(X(marker),b);p.stroke();p.setLineDash([]);
+  }
+  p.strokeStyle=color;p.lineWidth=1.8;p.beginPath();
+  x.forEach((v,i)=>i?p.lineTo(X(v),Y(y[i])):p.moveTo(X(v),Y(y[i])));p.stroke();
+}
+function draw(){
+  if(!result)return;
+  chart('field',result.t,result.field,'入射電場 E（原子単位）','時間（fs）','#16768b');
+  chart('current',result.t,result.current,'電荷電流密度 j（原子単位）','時間（fs）','#00745a');
+  chart('loss',result.energy,result.loss,'誘電率の虚部 Im ε','光子エネルギー（eV）','#7b4986',measured.photon_ev);
+}
+get('controls').addEventListener('submit',e=>{
+  e.preventDefault();get('run').disabled=true;get('status').textContent='計算中…';
+  const params={model:get('model').value};
+  for(const id of Object.keys(knobs))params[id]=Number(get(id).value);
+  try{
+    const data=simulate(params);
+    result=data;measured=params;draw();get('csv').disabled=false;
+    get('status').textContent='計算済み · '+params.photon_ev+' eV / '+params.width_fs+' fs / ℏγ '+params.damping_ev+' eV';
+  } catch(error){get('status').textContent=error.message;}
+  finally{get('run').disabled=false;}
+});
+get('csv').onclick=()=>{
+  const {model,photon_ev,width_fs,damping_ev}=measured;
+  const rows=['time_fs,field_au,current_au,model,photon_ev,intensity_fwhm_fs,damping_ev',
+    ...result.t.map((t,i)=>[t,result.field[i],result.current[i],model,photon_ev,width_fs,damping_ev].join(','))];
+  const url=URL.createObjectURL(new Blob([rows.join('\n')+'\n'],{type:'text/csv'}));
+  const link=document.createElement('a');link.href=url;link.download='salmonpy_response.csv';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+window.addEventListener('resize',draw);
+get('controls').requestSubmit();
+</script>
+</html>
